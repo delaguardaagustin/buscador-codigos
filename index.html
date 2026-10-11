@@ -42,6 +42,12 @@
   dialog svg { max-width:100%; height:auto; }
   dialog button { margin-top:12px; width:100%; height:54px; border:0; border-radius:12px; background:var(--tinta); color:#fff; font:inherit; font-weight:700; cursor:pointer; }
   footer { position:fixed; left:0; right:0; bottom:0; padding:8px 16px calc(8px + env(safe-area-inset-bottom)); background:var(--fondo); border-top:1px solid var(--linea); font-size:13px; color:var(--suave); text-align:center; }
+  dialog button.sec { background:#fff; color:var(--tinta); border:2px solid var(--tinta); }
+  dialog button.sec[disabled] { opacity:.55; }
+  #dlg-aviso { min-height:20px; color:var(--verde); font-weight:600; }
+  #aprendidas { margin:18px 0 0; font-size:14px; color:var(--suave); text-align:center; }
+  #aprendidas button { margin-left:8px; min-height:44px; padding:0 12px; border:1px solid var(--linea); border-radius:10px; background:#fff; font:inherit; font-size:14px; color:var(--tinta); cursor:pointer; }
+  #enseno { position:absolute; opacity:0; width:1px; height:1px; }
 </style>
 </head>
 <body>
@@ -61,6 +67,7 @@
   <img id="miniatura" alt="Foto tomada">
   <p id="estado" role="status" aria-live="polite"></p>
   <div id="res"></div>
+  <p id="aprendidas" hidden></p>
 </main>
 <footer>Muestra con los códigos de sus hojas · hecha por SENTRY-CODE</footer>
 
@@ -70,6 +77,10 @@
   <p id="dlg-nota"></p>
   <svg id="dlg-barra" role="img" aria-label="Código de barras"></svg>
   <p>Marque el número en la balanza o pase el lector por el código de barras.</p>
+  <p id="dlg-aviso" role="status" aria-live="polite"></p>
+  <button id="dlg-recordar" class="sec" type="button" hidden>Sí, era este: recordar la foto</button>
+  <button id="dlg-ensenar" class="sec" type="button">Enseñar con una foto</button>
+  <input id="enseno" type="file" accept="image/*" capture="environment" aria-label="Sacar una foto para enseñar este producto" tabindex="-1">
   <button id="dlg-cerrar" type="button">Listo</button>
 </dialog>
 
@@ -79,10 +90,13 @@ import { PRODUCTOS, CATEGORIAS, GRUPOS } from './catalogo.js';
 const $ = (s) => document.querySelector(s);
 const sinTildes = (t) => t.normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase();
 const esc = (t) => t.replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
-let cat = '', porFoto = null;                       // porFoto: [{grupo, pct}] cuando se está mostrando el resultado de una foto
+let cat = '', porFoto = null;                       // porFoto: { conocidos: [{codigo, pct}], grupos: [{grupo, pct}] }
+let ultima = null;                                  // huella de la última foto tomada (para poder recordarla)
+let abierto = null;                                 // producto que muestra la ficha
 
-function fila(p) {
+function fila(p, extra) {
   return '<button class="prod" type="button" data-cod="' + p.codigo + '"><b>' + p.codigo + '</b><span>' + esc(p.nombre) +
+    (extra ? '<small style="color:var(--verde)">' + extra + '</small>' : '') +
     (p.confirmar ? '<small>Código por confirmar: en la hoja no se leía bien</small>' : '') + '</span></button>';
 }
 
@@ -90,18 +104,24 @@ function pintar() {
   const q = sinTildes($('#q').value.trim()), palabras = q.split(/\s+/).filter(Boolean);
   let html = '';
   if (porFoto && !q) {
-    for (const { grupo, pct } of porFoto) {
-      const ps = PRODUCTOS.filter(p => p.grupo === grupo);
-      html += '<h2 class="grupo">' + esc(GRUPOS[grupo][0]) + ' · ' + pct + ' % de parecido</h2><div class="lista">' + ps.map(fila).join('') + '</div>';
+    if (porFoto.conocidos.length) {
+      html += '<h2 class="grupo">Fotos que ya me enseñaron</h2><div class="lista">' +
+        porFoto.conocidos.map(c => fila(PRODUCTOS.find(p => p.codigo === c.codigo), c.pct + ' % de parecido con sus fotos')).join('') + '</div>';
+    }
+    const ya = new Set(porFoto.conocidos.map(c => c.codigo));
+    for (const { grupo, pct } of porFoto.grupos) {
+      const ps = PRODUCTOS.filter(p => p.grupo === grupo && !ya.has(p.codigo));
+      if (ps.length) html += '<h2 class="grupo">' + esc(GRUPOS[grupo][0]) + ' · ' + pct + ' % de parecido</h2><div class="lista">' + ps.map(p => fila(p)).join('') + '</div>';
     }
   } else {
     const ps = PRODUCTOS.filter(p => (!cat || p.categoria === cat) &&
       palabras.every(w => sinTildes(p.nombre).includes(w) || p.codigo.startsWith(w)));
     $('#estado').className = ''; $('#miniatura').style.display = 'none';
     $('#estado').textContent = ps.length + (ps.length === 1 ? ' producto' : ' productos');
-    html = ps.length ? '<div class="lista">' + ps.map(fila).join('') + '</div>' : '<p class="vacio">No hay ningún producto con ese nombre. Pruebe con otra palabra.</p>';
+    html = ps.length ? '<div class="lista">' + ps.map(p => fila(p)).join('') + '</div>' : '<p class="vacio">No hay ningún producto con ese nombre. Pruebe con otra palabra.</p>';
   }
   $('#res').innerHTML = html;
+  pintarAprendidas();
 }
 
 $('#cats').innerHTML = ['', ...CATEGORIAS].map(c => '<button type="button" data-cat="' + c + '" aria-pressed="' + (c === cat) + '">' + (c || 'Todos') + '</button>').join('');
@@ -115,54 +135,141 @@ $('#q').addEventListener('input', () => { porFoto = null; pintar(); });
 
 $('#res').addEventListener('click', (e) => {
   const b = e.target.closest('.prod'); if (!b) return;
-  const p = PRODUCTOS.find(x => x.codigo === b.dataset.cod);
+  const p = abierto = PRODUCTOS.find(x => x.codigo === b.dataset.cod);
   $('#dlg-nombre').textContent = p.nombre; $('#dlg-num').textContent = p.codigo;
   $('#dlg-nota').textContent = p.confirmar ? 'Código por confirmar con la hoja original.' : p.categoria;
   try { JsBarcode('#dlg-barra', p.codigo, { format: 'CODE128', width: 3, height: 90, displayValue: false, margin: 8 }); $('#dlg-barra').style.display = ''; }
   catch { $('#dlg-barra').style.display = 'none'; }
+  $('#dlg-aviso').textContent = '';
+  /* Si se llegó aquí desde una foto, se ofrece recordarla; si no, se ofrece enseñar una nueva. */
+  const desdeFoto = !!(porFoto && ultima);
+  $('#dlg-recordar').hidden = !desdeFoto; $('#dlg-recordar').disabled = false;
+  $('#dlg-ensenar').hidden = desdeFoto; $('#dlg-ensenar').disabled = false;
   $('#dlg').showModal();
 });
 $('#dlg-cerrar').addEventListener('click', () => $('#dlg').close());
 
-/* ---------- Reconocer por foto: el modelo corre en el mismo teléfono, la foto no se envía a ningún servidor ---------- */
-let clasificador = null;
+/* ---------- Reconocer por foto. Todo corre en el mismo teléfono: la foto no se envía a ningún servidor ---------- */
+const MODELO = 'Xenova/clip-vit-base-patch32';
 const claves = Object.keys(GRUPOS), frases = claves.map(k => 'a photo of ' + GRUPOS[k][1]);
-async function cargarModelo() {
-  if (clasificador) return clasificador;
-  const { pipeline, env } = await import('https://cdn.jsdelivr.net/npm/@xenova/transformers@2.17.2');
-  env.allowLocalModels = false;
-  clasificador = await pipeline('zero-shot-image-classification', 'Xenova/clip-vit-base-patch32', {
-    progress_callback: (x) => { if (x.status === 'progress' && x.total > 5e6) decir('Preparando el reconocimiento por primera vez… ' + Math.round(x.progress) + ' %'); },
-  });
-  return clasificador;
+const SEGURO_GRUPO = 45, MIN_GRUPO = 15;            // % de parecido con el tipo de producto
+const SEGURO_FOTO = 82, MIN_FOTO = 70, VENTAJA = 6; // % de parecido con una foto enseñada. Medido el 11-10: mismo producto 76 a 92, productos distintos 40 a 58
+let motor = null;                                   // { processor, vision, RawImage, textos: [Float32Array] }
+
+const norma = (v) => { let s = 0; for (const x of v) s += x * x; s = Math.sqrt(s) || 1; return Float32Array.from(v, x => x / s); };
+const punto = (a, b) => { let s = 0; for (let i = 0; i < a.length; i++) s += a[i] * b[i]; return s; };
+const aTexto = (v) => { const b = new Uint8Array(v.buffer); let t = ''; for (const x of b) t += String.fromCharCode(x); return btoa(t); };
+const aVector = (t) => { const b = atob(t), u = new Uint8Array(b.length); for (let i = 0; i < b.length; i++) u[i] = b.charCodeAt(i); return new Float32Array(u.buffer); };
+const guardado = { leer(k) { try { return JSON.parse(localStorage.getItem(k)); } catch { return null; } }, poner(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); return true; } catch { return false; } } };
+const CLAVE_TEXTOS = 'bc-textos-1-' + frases.length + '-' + frases.join('|').length, CLAVE_FOTOS = 'bc-fotos-1';
+
+/* Fotos enseñadas: [{ c: código, v: huella en texto }]. Viven en este teléfono. */
+let fotos = (guardado.leer(CLAVE_FOTOS) || []).filter(f => PRODUCTOS.some(p => p.codigo === f.c)).map(f => ({ c: f.c, v: aVector(f.v) }));
+const guardarFotos = () => guardado.poner(CLAVE_FOTOS, fotos.map(f => ({ c: f.c, v: aTexto(f.v) })));
+function pintarAprendidas() {
+  const a = $('#aprendidas'); a.hidden = !fotos.length; if (!fotos.length) return;
+  const prods = new Set(fotos.map(f => f.c)).size;
+  a.innerHTML = fotos.length + (fotos.length === 1 ? ' foto enseñada' : ' fotos enseñadas') + ' de ' + prods + (prods === 1 ? ' producto' : ' productos') +
+    ' <button type="button" id="olvidar">Olvidar todas</button>';
 }
+$('#aprendidas').addEventListener('click', (e) => {
+  if (e.target.id !== 'olvidar') return;
+  if (!confirm('¿Olvidar todas las fotos enseñadas en este teléfono?')) return;
+  fotos = []; guardarFotos(); porFoto = null; pintar();
+});
+
 function decir(t, aviso) { $('#estado').textContent = t; $('#estado').className = aviso ? 'aviso' : ''; }
+
+async function cargarModelo() {
+  if (motor) return motor;
+  const T = await import('https://cdn.jsdelivr.net/npm/@xenova/transformers@2.17.2');
+  T.env.allowLocalModels = false;
+  const avance = (x) => { if (x.status === 'progress' && x.total > 5e6) decir('Preparando el reconocimiento por primera vez… ' + Math.round(x.progress) + ' %'); };
+  const processor = await T.AutoProcessor.from_pretrained(MODELO);
+  const vision = await T.CLIPVisionModelWithProjection.from_pretrained(MODELO, { progress_callback: avance });
+  /* Las descripciones de los tipos de producto se calculan una sola vez y quedan guardadas. */
+  let textos = (guardado.leer(CLAVE_TEXTOS) || []).map(aVector);
+  if (textos.length !== frases.length) {
+    const tokenizer = await T.AutoTokenizer.from_pretrained(MODELO);
+    const modeloTexto = await T.CLIPTextModelWithProjection.from_pretrained(MODELO, { progress_callback: avance });
+    const { text_embeds } = await modeloTexto(tokenizer(frases, { padding: true, truncation: true }));
+    const d = text_embeds.dims[1]; textos = frases.map((_, i) => norma(text_embeds.data.slice(i * d, (i + 1) * d)));
+    guardado.poner(CLAVE_TEXTOS, textos.map(aTexto));
+  }
+  motor = { processor, vision, RawImage: T.RawImage, textos };
+  return motor;
+}
+async function huella(url) {
+  const m = await cargarModelo();
+  const { image_embeds } = await m.vision(await m.processor(await m.RawImage.read(url)));
+  return norma(image_embeds.data);
+}
+function comparar(v) {
+  /* Tipos de producto: mismo cálculo que hace el modelo (parecido × 100 y reparto en porcentajes). */
+  const l = motor.textos.map(t => 100 * punto(v, t)), mx = Math.max(...l), e = l.map(x => Math.exp(x - mx)), sum = e.reduce((a, b) => a + b, 0);
+  const grupos = claves.map((g, i) => ({ grupo: g, pct: Math.round(100 * e[i] / sum) })).sort((a, b) => b.pct - a.pct).slice(0, 3).filter(x => x.pct >= MIN_GRUPO);
+  /* Fotos enseñadas: el mejor parecido por producto. */
+  const mejor = {};
+  for (const f of fotos) { const s = Math.round(100 * punto(v, f.v)); if (!(f.c in mejor) || s > mejor[f.c]) mejor[f.c] = s; }
+  window.__parecidos = mejor;
+  const conocidos = Object.entries(mejor).map(([codigo, pct]) => ({ codigo, pct })).filter(x => x.pct >= MIN_FOTO).sort((a, b) => b.pct - a.pct).slice(0, 3);
+  return { conocidos, grupos };
+}
 
 async function reconocer(archivo) {
   if (!archivo.type.startsWith('image/')) { decir('Ese archivo no es una foto. Pruebe de nuevo con la cámara.', true); return; }
   const url = URL.createObjectURL(archivo);
   $('#miniatura').src = url; $('#miniatura').style.display = 'block';
-  $('#q').value = ''; $('#res').innerHTML = '';
+  $('#q').value = ''; $('#res').innerHTML = ''; ultima = null;
   decir('Mirando la foto…');
   try {
-    const c = await cargarModelo();
+    const v = await huella(url);
     decir('Mirando la foto…');
-    const r = await c(url, frases);
-    const mejores = r.slice(0, 3).map(x => ({ grupo: claves[frases.indexOf(x.label)], pct: Math.round(x.score * 100) })).filter(x => x.pct >= 15);   /* bajo 15 % es ruido: no se muestra */
-    window.__ultimaFoto = mejores;
-    const seguro = mejores.length && mejores[0].pct >= 45;   /* con menos parecido se equivoca seguido: mejor decirlo */
-    porFoto = mejores.length ? mejores : null;
+    const r = comparar(v); ultima = v;
+    window.__ultimaFoto = r;
+    porFoto = (r.conocidos.length || r.grupos.length) ? r : null;
     pintar();
     $('#miniatura').style.display = 'block';
-    if (seguro) decir('Parece ' + GRUPOS[mejores[0].grupo][0].toLowerCase() + '. Toque el producto correcto.');
-    else decir(mejores.length ? 'No estoy seguro. Puede ser alguno de estos; si no está, escriba el nombre.' : 'No reconozco el producto. Escriba el nombre.', true);
+    const c = r.conocidos[0], c2 = r.conocidos[1], g = r.grupos[0];
+    /* Solo lo afirma si se parece mucho y le saca ventaja al segundo (dos marcas de jamón se parecen entre sí). */
+    if (c && c.pct >= SEGURO_FOTO && (!c2 || c.pct - c2.pct >= VENTAJA)) decir('Es ' + PRODUCTOS.find(p => p.codigo === c.codigo).nombre.toLowerCase() + ': se parece a una foto que ya me enseñaron.');
+    else if (c) decir('Se parece a ' + (c2 ? 'fotos' : 'una foto') + ' que ya me enseñaron. Confirme abajo cuál es.');
+    else if (g && g.pct >= SEGURO_GRUPO) decir('Parece ' + GRUPOS[g.grupo][0].toLowerCase() + '. Toque el producto correcto.');
+    else if (porFoto) decir('No estoy seguro. Puede ser alguno de estos; si no está, escriba el nombre.', true);
+    else decir('No reconozco el producto. Escriba el nombre y, si quiere, enséñemelo con una foto.', true);
   } catch (err) {
     console.error(err); porFoto = null;
     decir('No se pudo usar la cámara inteligente (revise la conexión). Escriba el nombre del producto.', true);
   }
 }
 $('#archivo').addEventListener('change', (e) => { const f = e.target.files[0]; e.target.value = ''; if (f) reconocer(f); });
-window.__reconocer = reconocer; window.__precargar = cargarModelo;                     // para las pruebas automáticas
+
+/* ---------- Enseñar ---------- */
+function aprender(codigo, v) {
+  fotos.push({ c: codigo, v });
+  if (!guardarFotos()) { fotos.pop(); return false; }
+  pintarAprendidas(); return true;
+}
+$('#dlg-recordar').addEventListener('click', () => {
+  if (!abierto || !ultima) return;
+  const ok = aprender(abierto.codigo, ultima);
+  $('#dlg-recordar').disabled = true;
+  $('#dlg-aviso').textContent = ok ? 'Listo. La próxima vez lo voy a reconocer mejor.' : 'No se pudo guardar: la memoria del teléfono está llena.';
+});
+$('#dlg-ensenar').addEventListener('click', () => $('#enseno').click());
+async function ensenar(archivo) {
+  if (!abierto) return;
+  if (!archivo.type.startsWith('image/')) { $('#dlg-aviso').textContent = 'Ese archivo no es una foto.'; return; }
+  $('#dlg-ensenar').disabled = true; $('#dlg-aviso').textContent = 'Aprendiendo de la foto…';
+  try {
+    const ok = aprender(abierto.codigo, await huella(URL.createObjectURL(archivo)));
+    $('#dlg-aviso').textContent = ok ? 'Aprendido. Puede enseñar otra foto desde otro ángulo.' : 'No se pudo guardar: la memoria del teléfono está llena.';
+  } catch (err) { console.error(err); $('#dlg-aviso').textContent = 'No se pudo aprender (revise la conexión).'; }
+  $('#dlg-ensenar').disabled = false;
+}
+$('#enseno').addEventListener('change', (e) => { const f = e.target.files[0]; e.target.value = ''; if (f) ensenar(f); });
+
+window.__reconocer = reconocer; window.__precargar = cargarModelo; window.__fotos = () => fotos.map(f => f.c);   // para las pruebas automáticas
 
 pintar();
 </script>
